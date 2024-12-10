@@ -1,0 +1,393 @@
+---
+title: "Group_Work_II"
+author: "Sebastian Wijnroks, Lenny Hurni, Elia Aeby, Marc Steiner, Fidan Bekaj"
+date: "2024-04-25"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE }
+knitr::opts_chunk$set(echo = TRUE)
+
+library(ggplot2)
+library(tidyr)
+library(tidyverse)
+library(RColorBrewer)
+library(knitr)
+library(stringr)
+library(syuzhet)
+library(tidytext)
+library(readr)
+library(tm)
+library(wordcloud)
+library(SnowballC)
+library(tidyEmoji)
+library(cld2)
+library(textcat)
+library(textclean)
+library(lubridate)
+library(dplyr)
+library(topicmodels)
+
+
+load("ChatGPT.rda")
+
+```
+
+## Data Preperation
+
+After loading the dataset with the tweets, we need to prepare the data accordingly. We remove duplicate tweets, the links within tweets, retweets are removed as well as emojis within the column User Description and Tweet. The emojis are removed with a function because we realized that packages for emoji removal are very dependent on the installed R-Version. To ensure it works for all users of this RMD File, we opted to go with a function.
+
+Lastly, we create a new dataset "filtered_tweets" while also addressing bot-tweets. We do this by dropping all tweets from accounts who were created less than 10 days before the date of the tweet and have less than 5 followers. It won't be possible to eliminate all bot tweets, however it can be reduced by a great amount. Furthermore we delete the column URL, as it has no real use for our analysis. Lastly we distinct the languages of the tweets, however only 343 of the total over 170'000 Tweets are non-english. We opted to drop them, so the filtered tweets are as well prepared as possible for the analysis.
+
+```{r DataPrep, include=FALSE, warning=FALSE, message=FALSE}
+# Remove duplicated tweets
+tweets <- tweets[!duplicated(tweets), ]
+# Remove links
+tweets$Tweet <- gsub("http.*","",  tweets$Tweet)
+tweets$Tweet <- gsub("https","", tweets$Tweet)
+# Remove "rt" (when retweeted)
+tweets$Tweet <- gsub("rt","", tweets$Tweet)
+tweets$Tweet <- gsub("RT","", tweets$Tweet)
+
+# Remove duplicate tweets based on the "Tweet" column
+tweets <- tweets %>%
+  distinct(Tweet, .keep_all = TRUE)
+
+# Define a function to remove emojis using a regular expression
+remove_emojis <- function(text) {
+  return(gsub("[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F700-\U0001F77F\U0001F780-\U0001F7FF\U0001F800-\U0001F8FF\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U00002702-\U000027B0\U000024C2-\U0001F251]", "", text, perl = TRUE))
+}
+
+# Remove emojis from the UserDescription and Tweet column
+tweets$UserDescription <- sapply(tweets$UserDescription, remove_emojis)
+tweets$Tweet <-sapply(tweets$Tweet, remove_emojis)
+
+#Remove @, #
+tweets$Tweet <- gsub("@","", tweets$Tweet)
+tweets$Tweet <- gsub("#","", tweets$Tweet)
+
+# Filter out Bot-Tweets and create new dataset "filtered_tweets"
+tweets$UserCreated <- as.Date(tweets$UserCreated)
+tweets$created_at <- as.Date(tweets$created_at)
+
+tweets <- tweets %>%
+  mutate(DaysSinceCreation = as.numeric(created_at - UserCreated))
+
+filtered_tweets <- tweets %>%
+  filter(DaysSinceCreation >= 10 | UserFollowers >= 5)
+
+# Delete Column "URL"
+filtered_tweets <- select(filtered_tweets, -Url) 
+
+#Sort Dataset by Language
+filtered_tweets <- filtered_tweets %>%
+  mutate(language = detect_language(Tweet))
+
+#Filter out non-english tweets
+non_english_tweets <- filtered_tweets %>%
+  filter(!is.na(language) & language != "en")
+num_non_english_tweets <- nrow(non_english_tweets)
+print(paste("Number of non-English tweets:", num_non_english_tweets))
+
+filtered_tweets <- filtered_tweets %>%
+  filter(is.na(language) | language == "en") %>%
+  select(-language)  # Deletes Column Language
+
+```
+
+## User Description
+
+First off we create user_stats. It groups tweets by user and summarizes data such as the number of tweets, followers, account age, location, user description, and verification status. This helps identify the most active users and their characteristics.After this we focus on the location from where the user is from. We do this by filtering and counting the number of tweets by user location and creating a bar plot for the top 10 locations. This shows where the most active users are tweeting from. The results show, that most of the users tweeting about ChatGPT are from India and the United States. Furthermore we analyze the difference between tweets from verified and unverified users, clearly showing that most tweets are from unverified accounts. Lastly to find out more about the interests and topics of the user, we create a wordcloud from the column User Description. In this column, the user writes facts about himself. The analysis shows, that most users are from a tech background, alongside  business and entreprenuers 
+
+```{r User Analysis, echo=FALSE, warning=FALSE, message=FALSE}
+# Analyze users tweeting about ChatGPT
+user_stats <- filtered_tweets %>%
+  group_by(User) %>%
+  summarize(
+    TweetCount = n(),
+    Followers = max(UserFollowers),
+    DaysSinceCreation = max(DaysSinceCreation),
+    Location = first(Location),
+    UserDescription = first(UserDescription),
+    UserVerified = first(UserVerified)
+  ) %>%
+  arrange(desc(TweetCount))
+
+# Display the top users
+head(user_stats)
+
+# Plot Tweet count by user location
+location_counts <- user_stats %>%
+  filter(!is.na(Location) & Location != "") %>%
+  count(Location, sort = TRUE) %>%
+  top_n(10)
+
+ggplot(location_counts, aes(x = reorder(Location, n), y = n)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top 10 User Locations Tweeting About ChatGPT", x = "Location", y = "Number of Tweets")
+
+verified_stats <- filtered_tweets %>%
+  group_by(UserVerified) %>%
+  summarize(UserCount = n()) %>%
+  mutate(UserVerified = ifelse(UserVerified, "Verified", "Not Verified"))
+
+ggplot(verified_stats, aes(x = UserVerified, y = UserCount, fill = UserVerified)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Count of Verified vs. Non-Verified Users Tweeting About ChatGPT",
+       x = "User Verified Status",
+       y = "Number of Users") +
+  scale_fill_manual(values = c("Verified" = "blue", "Not Verified" = "red")) +
+  theme_minimal()
+
+# Word cloud for user descriptions
+user_descriptions <- paste(filtered_tweets$UserDescription, collapse = " ")
+user_descriptions <- tolower(user_descriptions)
+user_descriptions <- removeWords(user_descriptions, stopwords("en"))
+user_descriptions <- removePunctuation(user_descriptions)
+wordcloud(user_descriptions, max.words = 200, random.order = FALSE, colors = brewer.pal(8, "Dark2"))
+
+```
+
+## Sentiment Analysis
+
+To start with the sentiment analysis of the tweets we tokenize the tweets and remove the common stop words. After this we get the sentiment, using a word lexicon from bing. This gives each one of the tweets a sentiment score between -10 and +10 with 0 being a neutral tweet towards ChatGPT. To properly visualize the sentiment scores we use a histogram. We can see that most of the tweets are neutral to slightly positive with the maximum positive/negative value being +6/-5. 
+
+To get an idea about the evolution of sentiment for or against ChatGPT we use ggplot2 and additionally the created at variable to plot it into a time frame of two months. We use three different categories, tweets with a sentiment score above 0 are labeled as positive, at 0 as neutral and below 0 as negative. The plot shows similarly to the histogram, that neutral and positive tweets are more or less the same over the timeframe, but overall always more than negative tweets. Therefore we can identify, that the majority of people tweeting about ChatGPT have a neutral / positive attitude against the AI. Next to this, the plot also shows the overall relevance of the topic ChatGPT over time showing that  the begin of December 2022 being the most relevant time and begin of January the least relevant.
+
+
+```{r Sentiment, echo=FALSE, warning=FALSE, message=FALSE}
+# Tokenize tweets and remove stop words
+tweets_words <- filtered_tweets %>%
+  unnest_tokens(word, Tweet) %>%
+  anti_join(stop_words)
+
+# Sentiment analysis
+filtered_tweets$sentiments <- get_sentiment(filtered_tweets$Tweet, method = "bing")
+
+# Aggregate sentiment scores
+sentiment_scores <- filtered_tweets %>%
+  group_by(sentiments) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+
+#Display sentiment scores
+sentiment_scores
+
+# Plot sentiment scores
+ggplot(sentiment_scores, aes(x = sentiments, y = count, fill = as.factor(sentiments))) +
+  geom_bar(stat = "identity") +
+  labs(title = "Sentiment Scores for Tweets About ChatGPT", x = "Sentiment", y = "Count") +
+  theme_minimal()
+
+#Sentiment Score evolution over time
+filtered_tweets$created_at <- as.Date(filtered_tweets$created_at)
+
+# Aggregate sentiment scores by date
+daily_sentiment <- filtered_tweets %>%
+  group_by(created_at) %>%
+  summarise(
+    positive = sum(sentiments > 0),
+    negative = sum(sentiments < 0),
+    neutral = sum(sentiments == 0)
+  ) %>%
+  gather(key = "sentiment", value = "count", -created_at)
+
+# Plot the sentiment scores over time
+ggplot(daily_sentiment, aes(x = created_at, y = count, color = sentiment)) +
+  geom_line() +
+  labs(title = "Evolution of Sentiment of Tweets About ChatGPT Over Time", 
+       x = "Date", 
+       y = "Count of Sentiments") +
+  scale_color_manual(values = c("positive" = "blue", "negative" = "red", "neutral" = "gray")) +
+  theme_minimal()
+
+```
+
+## Top Words
+
+Next, we want to take a look with what topics ChatGPT is associated with by the users tweeting about it. First off we just take a basic look at what words are most often used. Naturally ChatGPT is the most used word, folllowed by AI, and OpenAI, the developer of ChatGPT.
+
+```{r Top Words, echo=FALSE, warning=FALSE, message=FALSE}
+# Top words associated with ChatGPT
+top_words <- tweets_words %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 50)  # Filter for words with more than 50 occurrences
+
+# Display top words
+head(top_words)
+```
+
+## Association / Topic Analysis
+
+Next we take a more indepth look at the topics and associations. 
+This code allows us to tag tweets with specific industries and applications, and then count how many tweets refer to these industries.
+
+We first define custom dictionaries for industries (education, healthcare, finance, entertainment, technology, marketing) and applications (customer service, content creation, data analysis, software development, language translation). Each tweet is tagged with the most relevant industry and application based on the presence of these keywords. If no keywords are found, we assign "Other". For the analysis we however drop the category other, because as most of the tweets do not refer to a industry it would distort the data. Same for the application, we only take a look at the tweets that actually refer to one of the defined applications and plot them using ggplot2.
+
+
+
+```{r Association Analysis, echo=FALSE, warning=FALSE, message=FALSE}
+# Define custom dictionaries for industries and applications
+industries <- c("education", "healthcare", "finance", "entertainment", "technology", "marketing")
+applications <- c("customer service", "content creation", "data analysis", "software development", "language translation")
+
+# Tag tweets with industries
+filtered_tweets$industry <- sapply(filtered_tweets$Tweet, function(tweet) {
+  matched <- sapply(industries, function(ind) grepl(ind, tweet, ignore.case = TRUE))
+  if (any(matched)) {
+    industry <- industries[which.max(matched)]
+  } else {
+    industry <- "Other"
+  }
+  return(industry)
+})
+
+# Remove the "Other" category from the industry tagging
+industry_tweets <- filtered_tweets %>% filter(industry != "Other")
+
+# Summarize the results for industries
+industry_summary <- industry_tweets %>%
+  count(industry, sort = TRUE)
+
+print(industry_summary)
+
+# Tag tweets with applications
+filtered_tweets$application <- sapply(filtered_tweets$Tweet, function(tweet) {
+  matched <- sapply(applications, function(app) grepl(app, tweet, ignore.case = TRUE))
+  if (any(matched)) {
+    application <- applications[which.max(matched)]
+  } else {
+    application <- "Other"
+  }
+  return(application)
+})
+
+# Remove the "Other" category from the application tagging
+application_tweets <- filtered_tweets %>% filter(application != "Other")
+
+# Summarize the results for applications
+application_summary <- application_tweets %>%
+  count(application, sort = TRUE)
+
+print(application_summary)
+
+# Plot the industry results using ggplot2
+ggplot(industry_summary, aes(x = reorder(industry, n), y = n)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Number of Tweets by Industry", x = "Industry", y = "Number of Tweets") +
+  theme_minimal()
+
+# Plot the application results using ggplot2
+ggplot(application_summary, aes(x = reorder(application, n), y = n)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Number of Tweets by Application", x = "Application", y = "Number of Tweets") +
+  theme_minimal()
+
+```
+
+In the topic modeling section, we take a random sample of 10,000 tweets to manage memory usage. We preprocess the text by converting it to lowercase, removing punctuation, numbers, stop words, and extra whitespace. We create a Document-Term Matrix (DTM) with term frequency weighting and remove any empty rows.
+
+We then fit an LDA (Latent Dirichlet Allocation) model to the DTM with 5 topics. Finally, we create a bar plot to visualize the top terms for each topic, with the terms reordered based on their beta values. This analysis helps us identify common themes and topics within the tweets. Because the Term "ChatGPT" is used quite often and distorts the other terms, we create a second plot where the term is excluded. Thereby, more can be said about the other terms and their beta score. The beta score gives the probability of a term used in the topic. In the results there are many different words used, however what's apparent is that all of them are positive. No terms like dangerous or scary are used, thereby underlining the results from the sentiment analysis. To add to this, we opted to create a final wordcloud from the sample tweets of 10'000. The most used terms are as seen in the LDA "ChatGPT" and "openAI".
+
+```{r topic modelling, echo=FALSE, warning=FALSE, message=FALSE}
+
+set.seed(1234)
+sampled_tweets <- filtered_tweets %>% sample_n(10000)  # Adjust sample size as needed
+
+# Define custom stop words
+custom_stopwords <- c(stopwords("en"), "will", "just", "can", "now", "get", "use", "even", "like", "see", "going", "asked")
+
+# Preprocess the text
+corpus <- Corpus(VectorSource(sampled_tweets$Tweet))
+corpus <- tm_map(corpus, content_transformer(tolower))
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, removeNumbers)
+corpus <- tm_map(corpus, removeWords, custom_stopwords)
+corpus <- tm_map(corpus, stripWhitespace)
+
+# Create a Document-Term Matrix with term frequency weighting
+dtm <- DocumentTermMatrix(corpus)
+
+# Remove empty rows
+row_totals <- apply(dtm, 1, sum)
+dtm <- dtm[row_totals > 0, ]
+
+# Fit the LDA model
+lda_model <- LDA(dtm, k = 5, control = list(seed = 1234))  # Adjust 'k' for number of topics
+
+# Get the topics
+topics <- tidy(lda_model, matrix = "beta")
+
+# Display the top terms for each topic
+top_terms <- topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+print(top_terms)
+
+topic_labels=c(
+  "1"="1",
+  "2"="2",
+  "3"="3",
+  "4"="4",
+  "5"="5")
+
+# Map topic numbers to labels
+top_terms$topic_label <- factor(top_terms$topic, levels = names(topic_labels), labels = topic_labels)
+
+# Summarize the results
+topic_summary <- top_terms %>%
+  group_by(topic_label) %>%
+  summarize(top_terms = paste(term, collapse = ", "))
+
+print(topic_summary)
+
+# Visualize the top terms in topics with descriptive labels
+ggplot(top_terms, aes(x = reorder(term, beta), y = beta, fill = topic_label)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top Terms in LDA Topics", x = "Terms", y = "Beta", fill = "Topic") +
+  theme_minimal()
+
+
+# Filter out the term "chatgpt"
+filtered_top_terms <- top_terms %>%
+  filter(term != "chatgpt")
+
+# Visualize the top terms in topics with descriptive labels, excluding "chatgpt"
+ggplot(filtered_top_terms, aes(x = reorder(term, beta), y = beta, fill = topic_label)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top Terms in LDA Topics (Excluding 'chatgpt')", x = "Terms", y = "Beta", fill = "Topic") +
+  theme_minimal()
+
+# Word cloud for Tweets
+wordcloud_tweet <- paste(sampled_tweets$Tweet, collapse = " ")
+wordcloud_tweet <- tolower(wordcloud_tweet)
+wordcloud_tweet <- removeWords(wordcloud_tweet, stopwords("en"))
+wordcloud_tweet <- removePunctuation(wordcloud_tweet)
+wordcloud(wordcloud_tweet, max.words = 200, random.order = FALSE, colors = brewer.pal(8, "Dark2"))
+```
+
+## Conclusion and advice to consulting company
+
+As a consulting company, you can leverage ChatGPT in several impactful ways for clients’ projects. The analysis of tweets reveals that users associate ChatGPT with various industries such as education, healthcare, finance, entertainment, technology, and marketing. The applications discussed include customer service, content creation, data analysis, software development, and language translation. This suggests that ChatGPT has versatile applications across different sectors.
+
+You should consider integrating ChatGPT for tasks such as automating customer service, where it can handle common inquiries and free up human agents for more complex issues. In content creation, ChatGPT can assist in generating articles, social media posts, and other written content, increasing efficiency and creativity. For data analysis, ChatGPT can provide insights by analyzing large datasets and generating reports. In software development, it can help in code generation, debugging, and documentation. Language translation can benefit from ChatGPT’s ability to understand and generate text in multiple languages, making it a valuable tool for global communications.
+
+From the sentiment analysis and topic modeling, it is evident that ChatGPT is more than just a hype. The consistent positive sentiment and the diverse applications discussed suggest that it is here to stay and will continue to evolve, providing valuable solutions in various domains.
+
+To integrate the analysis of tweets related to new trends and technologies into your internal processes, you can set up a pipeline for continuous monitoring. This involves using Twitter’s API to collect tweets related to specific keywords, storing this data in a database, and regularly analyzing it to identify emerging trends. You can create dashboards that visualize the sentiment and topics over time, helping you stay ahead of industry trends and make informed recommendations to your clients.
+
+Data products that could be valuable include real-time trend monitoring dashboards, automated sentiment analysis reports, industry-specific insights, and predictive analytics for emerging technologies. These products would help you provide clients with up-to-date information and strategic advice, positioning you as thought leaders in technology scouting and innovation.
+
+Overall, integrating ChatGPT and continuous tweet analysis into your consulting practice will enhance your ability to deliver innovative solutions and maintain a competitive edge in the market.
